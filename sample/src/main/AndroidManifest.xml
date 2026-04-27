@@ -8,7 +8,7 @@
         android:label="StreamForge Sample"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
-        android:theme="@style/Theme.MaterialComponents.Light.NoActionBar">
+        android:theme="@style/Theme.AppCompat.Light.NoActionBar">
 
         <activity
             android:name=".MainActivity"

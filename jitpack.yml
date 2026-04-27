@@ -1,0 +1,6 @@
+jdk:
+  - openjdk17
+before_install:
+  - sdk-manager --install "platforms;android-34" "build-tools;34.0.0"
+install:
+  - ./gradlew :sdk:publishToMavenLocal :sdk-cast:publishToMavenLocal

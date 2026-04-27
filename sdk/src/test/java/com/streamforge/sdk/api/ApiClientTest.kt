@@ -2,6 +2,8 @@ package com.streamforge.sdk.api
 
 import com.streamforge.sdk.exception.SFApiException
 import com.streamforge.sdk.exception.SFAuthException
+import com.streamforge.sdk.model.SdkTenantResponse
+import com.streamforge.sdk.model.StreamUrlResponse
 import kotlinx.coroutines.test.runTest
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -38,7 +40,7 @@ class ApiClientTest {
             .setResponseCode(200)
             .setBody("""{"tenant":{"id":"t1","slug":"test","name":"Test","status":"active"}}"""))
 
-        client.execute { getTenant() }
+        client.execute<SdkTenantResponse> { getTenant() }
 
         val request = server.takeRequest()
         assertEquals("sf_test_abc123", request.getHeader("X-API-Key"))
@@ -50,7 +52,7 @@ class ApiClientTest {
             .setResponseCode(200)
             .setBody("""{"tenant":{"id":"t1","slug":"test","name":"Test","status":"active"}}"""))
 
-        client.execute { getTenant() }
+        client.execute<SdkTenantResponse> { getTenant() }
 
         val request = server.takeRequest()
         assertTrue(request.path!!.startsWith("/api/v1/"))
@@ -62,7 +64,7 @@ class ApiClientTest {
             .setResponseCode(200)
             .setBody("""{"tenant":{"id":"t1","slug":"demo","name":"Demo Tenant","status":"active","brand_color":"#FF0000"}}"""))
 
-        val response = client.execute { getTenant() }
+        val response = client.execute<SdkTenantResponse> { getTenant() }
         assertEquals("t1", response.tenant.id)
         assertEquals("demo", response.tenant.slug)
         assertEquals("Demo Tenant", response.tenant.name)
@@ -76,7 +78,7 @@ class ApiClientTest {
             .setResponseCode(200)
             .setBody("""{"url":"https://edge.example.com/live/stream1/index.m3u8","title":"My Stream","is_live":true}"""))
 
-        val response = client.execute { getStreamUrl("stream-id-1") }
+        val response = client.execute<StreamUrlResponse> { getStreamUrl("stream-id-1") }
         assertEquals("https://edge.example.com/live/stream1/index.m3u8", response.url)
         assertEquals("My Stream", response.title)
         assertTrue(response.isLive)
@@ -88,7 +90,7 @@ class ApiClientTest {
             .setResponseCode(401)
             .setBody("""{"message":"Invalid API key"}"""))
 
-        client.execute { getTenant() }
+        client.execute<SdkTenantResponse> { getTenant() }
     }
 
     @Test(expected = SFAuthException::class)
@@ -97,7 +99,7 @@ class ApiClientTest {
             .setResponseCode(403)
             .setBody("""{"message":"Forbidden"}"""))
 
-        client.execute { getTenant() }
+        client.execute<SdkTenantResponse> { getTenant() }
     }
 
     @Test(expected = SFApiException::class)
@@ -106,7 +108,7 @@ class ApiClientTest {
             .setResponseCode(404)
             .setBody("""{"message":"Not found"}"""))
 
-        client.execute { getStreamUrl("nonexistent") }
+        client.execute<StreamUrlResponse> { getStreamUrl("nonexistent") }
     }
 
     @Test(expected = SFApiException::class)
@@ -115,7 +117,7 @@ class ApiClientTest {
             .setResponseCode(500)
             .setBody("""{"message":"Internal server error"}"""))
 
-        client.execute { getTenant() }
+        client.execute<SdkTenantResponse> { getTenant() }
     }
 
     @Test
@@ -125,7 +127,7 @@ class ApiClientTest {
             .setBody("""{"message":"Bad key"}"""))
 
         try {
-            client.execute { getTenant() }
+            client.execute<SdkTenantResponse> { getTenant() }
             fail("Expected SFAuthException")
         } catch (e: SFAuthException) {
             assertEquals(401, e.statusCode)
@@ -139,7 +141,7 @@ class ApiClientTest {
             .setBody("""{"message":"Validation failed"}"""))
 
         try {
-            client.execute { getTenant() }
+            client.execute<SdkTenantResponse> { getTenant() }
             fail("Expected SFApiException")
         } catch (e: SFApiException) {
             assertEquals(422, e.statusCode)

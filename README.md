@@ -42,10 +42,10 @@ Add dependencies to `app/build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.github.streamforge.android-sdk:sdk:0.1.0")
+    implementation("com.github.shoelfikar.streamforge-android-sdk:sdk:0.1.0")
 
     // Optional — Chromecast
-    implementation("com.github.streamforge.android-sdk:sdk-cast:0.1.0")
+    implementation("com.github.shoelfikar.streamforge-android-sdk:sdk-cast:0.1.0")
 }
 ```
 

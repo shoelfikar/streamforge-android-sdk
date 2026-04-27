@@ -1,6 +1,6 @@
 # StreamForge Android SDK
 
-Android SDK for [StreamForge](https://streamforge.com) live streaming platform. Provides a seamless, one-call API to embed live stream players in your Android app.
+Android SDK for StreamForge live streaming platform. Provides a seamless, one-call API to embed live stream players in your Android app.
 
 ## Features
 

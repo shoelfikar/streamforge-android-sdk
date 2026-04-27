@@ -1,7 +1,7 @@
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
-    id("com.vanniktech.maven.publish")
+    id("maven-publish")
 }
 
 android {
@@ -70,10 +70,15 @@ dependencies {
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
 
-mavenPublishing {
-    publishToMavenCentral(
-        com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL,
-        automaticRelease = true
-    )
-    signAllPublications()
+afterEvaluate {
+    publishing {
+        publications {
+            create<MavenPublication>("release") {
+                from(components["release"])
+                groupId = "com.streamforge"
+                artifactId = "sdk"
+                version = findProperty("VERSION_NAME") as String? ?: "0.1.0"
+            }
+        }
+    }
 }

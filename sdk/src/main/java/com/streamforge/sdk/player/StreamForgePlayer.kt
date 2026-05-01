@@ -80,11 +80,23 @@ class StreamForgePlayer internal constructor(
      */
     fun observeEvents(): Flow<StreamForgeEvent> = EventBus.events
 
+    var isMuted: Boolean = false
+        private set
+
     fun play() = engine.play()
     fun pause() = engine.pause()
     fun seekTo(positionMs: Long) = engine.seekTo(positionMs)
     fun setVolume(volume: Float) = engine.setVolume(volume)
-    fun setMuted(muted: Boolean) = engine.setMuted(muted)
+
+    fun setMuted(muted: Boolean) {
+        isMuted = muted
+        engine.setMuted(muted)
+        view?.setMuteState(muted)
+    }
+
+    fun toggleMute() {
+        setMuted(!isMuted)
+    }
 
     // ── Fullscreen ──
 

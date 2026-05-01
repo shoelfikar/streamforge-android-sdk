@@ -7,6 +7,7 @@ import com.streamforge.sdk.model.TenantConfig
 import com.streamforge.sdk.exception.StreamForgeException
 import com.streamforge.sdk.player.PlaybackState
 import com.streamforge.sdk.player.PlayerEventListener
+import com.streamforge.sdk.player.StreamForgeErrorView
 import com.streamforge.sdk.player.StreamForgePlayer
 import com.streamforge.sdk.player.StreamForgePlayerView
 import android.widget.FrameLayout
@@ -198,10 +199,11 @@ object StreamForge {
                     setBackgroundColor(0xFF000000.toInt())
                 }
 
-                // 3. Attach view & set title
+                // 3. Attach view & set title and metadata
                 player.attachView(playerView)
                 playerView.player = player
                 playerView.setTitle(_streamTitle)
+                playerView.setLiveStatus(true)
 
                 // 4. Load stream with auto-play
                 player.load(object : PlayerEventListener {
@@ -215,11 +217,22 @@ object StreamForge {
                 // 5. Notify success
                 playerSetupListener.onPlayerSetupSuccess(playerView)
             } catch (e: StreamForgeException) {
-                playerSetupListener.onPlayerSetupFailed(e)
+                val errorView = StreamForgeErrorView(context, e).apply {
+                    layoutParams = FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
+                    )
+                }
+                playerSetupListener.onPlayerSetupFailed(e, errorView)
             } catch (e: Exception) {
-                playerSetupListener.onPlayerSetupFailed(
-                    StreamForgeException("Player setup failed: ${e.message}", e)
-                )
+                val sfException = StreamForgeException("Player setup failed: ${e.message}", e)
+                val errorView = StreamForgeErrorView(context, sfException).apply {
+                    layoutParams = FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
+                    )
+                }
+                playerSetupListener.onPlayerSetupFailed(sfException, errorView)
             }
         }
     }
@@ -251,7 +264,7 @@ object StreamForge {
     interface PlayerSetupListener {
         /** Called when the player is ready. Add the [player] view to your layout. */
         fun onPlayerSetupSuccess(player: StreamForgePlayerView)
-        /** Called when player setup fails. */
-        fun onPlayerSetupFailed(error: StreamForgeException)
+        /** Called when player setup fails. [errorView] is a ready-to-use error UI that can be added to your layout. */
+        fun onPlayerSetupFailed(error: StreamForgeException, errorView: StreamForgeErrorView)
     }
 }

@@ -16,6 +16,7 @@ import com.streamforge.sdk.StreamForgeConfig
 import com.streamforge.sdk.cast.StreamForgeCast
 import com.streamforge.sdk.exception.StreamForgeException
 import com.streamforge.sdk.player.QualityOption
+import com.streamforge.sdk.player.StreamForgeErrorView
 import com.streamforge.sdk.player.StreamForgePlayerView
 
 class MainActivity : AppCompatActivity() {
@@ -26,8 +27,8 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Force landscape
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        // Allow both portrait and landscape
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
 
         // Container for the player view
         val container = FrameLayout(this).apply {
@@ -47,8 +48,8 @@ class MainActivity : AppCompatActivity() {
 
         // ────────────────────────────────────────────────
         // GANTI DENGAN VALUE KAMU:
-        val apiKey   = "sf_test_rAODDbjJFssnUF9UCNrR2kR2cji898oVBMpQAOIBT-A"
-        val streamId = "d25ad14c-81c8-4d5d-b4bc-3a3cb23298a7"
+        val apiKey   = "sf_live_YVcX22MkKrf2E0l-LG66w35JhEaGFXImVhtfV4iffOo"
+        val streamId = "7bade560-472b-4643-a806-8e3d90c6dde0"
         // ────────────────────────────────────────────────
 
         StreamForge.createPlayer(
@@ -68,11 +69,26 @@ class MainActivity : AppCompatActivity() {
 
                     val sfPlayer = player.player ?: return
 
+                    // ── Set stream metadata ──
+                    player.setSubtitle("Metro TV")
+                    player.setLiveStatus(true)
+                    player.setViewerCount("45.2K")
+
                     // ── Wire up control bar buttons ──
 
                     // Back button — finish activity
                     player.setOnBackClickListener {
                         this@MainActivity.finish()
+                    }
+
+                    // Volume toggle
+                    player.setOnVolumeClickListener {
+                        sfPlayer.toggleMute()
+                    }
+
+                    // Fullscreen toggle
+                    player.setOnFullscreenClickListener {
+                        sfPlayer.toggleFullscreen(this@MainActivity)
                     }
 
                     // Quality selector
@@ -83,8 +99,10 @@ class MainActivity : AppCompatActivity() {
                                 currentQuality = selected
                                 if (selected.isAuto) {
                                     sfPlayer.setAutoQuality()
+                                    player.setCurrentQualityLabel("Auto")
                                 } else {
                                     sfPlayer.setQuality(selected)
+                                    player.setCurrentQualityLabel(selected.label)
                                 }
                                 Log.d("StreamForge", "Quality selected: ${selected.label}")
                             }
@@ -102,8 +120,14 @@ class MainActivity : AppCompatActivity() {
                     Log.d("StreamForge", "Player setup success — stream is playing")
                 }
 
-                override fun onPlayerSetupFailed(error: StreamForgeException) {
+                override fun onPlayerSetupFailed(error: StreamForgeException, errorView: StreamForgeErrorView) {
                     Log.e("StreamForge", "Player setup failed", error)
+                    errorView.setOnBackClickListener { this@MainActivity.finish() }
+                    errorView.setOnRetryClickListener {
+                        container.removeAllViews()
+                        recreate()
+                    }
+                    container.addView(errorView)
                 }
             }
         )

@@ -49,7 +49,7 @@ class MainActivity : AppCompatActivity() {
         // ────────────────────────────────────────────────
         // GANTI DENGAN VALUE KAMU:
         val apiKey   = "sf_live_YVcX22MkKrf2E0l-LG66w35JhEaGFXImVhtfV4iffOo"
-        val streamId = "7bade560-472b-4643-a806-8e3d90c6dde0"
+        val streamId = "eed851bc-94c4-4fd9-9479-37864de25a9c"
         // ────────────────────────────────────────────────
 
         StreamForge.createPlayer(
@@ -84,11 +84,6 @@ class MainActivity : AppCompatActivity() {
                     // Volume toggle
                     player.setOnVolumeClickListener {
                         sfPlayer.toggleMute()
-                    }
-
-                    // Fullscreen toggle
-                    player.setOnFullscreenClickListener {
-                        sfPlayer.toggleFullscreen(this@MainActivity)
                     }
 
                     // Quality selector

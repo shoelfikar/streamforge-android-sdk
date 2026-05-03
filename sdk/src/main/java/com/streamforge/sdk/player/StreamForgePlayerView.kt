@@ -15,8 +15,11 @@ import android.os.Handler
 import android.os.Looper
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ImageView
 import android.widget.TextView
+import androidx.appcompat.content.res.AppCompatResources
 import androidx.media3.ui.PlayerView
+import com.streamforge.sdk.R
 
 class StreamForgePlayerView @JvmOverloads constructor(
     context: Context,
@@ -38,7 +41,6 @@ class StreamForgePlayerView @JvmOverloads constructor(
     private var onBackClickListener: (() -> Unit)? = null
     private var onQualityClickListener: (() -> Unit)? = null
     private var onPipClickListener: (() -> Unit)? = null
-    private var onFullscreenClickListener: (() -> Unit)? = null
     private var onVolumeClickListener: (() -> Unit)? = null
 
     private var overlayVisible = false
@@ -66,6 +68,25 @@ class StreamForgePlayerView @JvmOverloads constructor(
         it.useController = false
         addView(it)
     }
+
+    // ── Offline overlay ──
+    private val offlineOverlay: FrameLayout = FrameLayout(context).apply {
+        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+        setBackgroundColor(0xCC000000.toInt())
+        visibility = View.GONE
+
+        val label = TextView(context).apply {
+            text = "Stream is offline"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
+                gravity = Gravity.CENTER
+            }
+        }
+        addView(label)
+    }.also { addView(it) }
 
     // ── Overlay container ──
     private val overlayContainer: FrameLayout = FrameLayout(context).apply {
@@ -107,6 +128,7 @@ class StreamForgePlayerView @JvmOverloads constructor(
 
     fun setLiveStatus(live: Boolean) {
         isLive = live
+        offlineOverlay.visibility = if (live) View.GONE else View.VISIBLE
         rebuildOverlay()
     }
 
@@ -130,10 +152,6 @@ class StreamForgePlayerView @JvmOverloads constructor(
 
     fun setOnPipClickListener(listener: () -> Unit) {
         onPipClickListener = listener
-    }
-
-    fun setOnFullscreenClickListener(listener: () -> Unit) {
-        onFullscreenClickListener = listener
     }
 
     fun setOnVolumeClickListener(listener: () -> Unit) {
@@ -325,7 +343,6 @@ class StreamForgePlayerView @JvmOverloads constructor(
         }
 
         rightControls.addView(createQualityButton())
-        rightControls.addView(createFullscreenButton())
 
         bottomControls.addView(rightControls)
         bottomSection.addView(bottomControls)
@@ -479,8 +496,6 @@ class StreamForgePlayerView @JvmOverloads constructor(
         // PiP button
         rightControls.addView(createPipButton())
 
-        rightControls.addView(createFullscreenButton())
-
         bottomBar.addView(rightControls)
         overlayContainer.addView(bottomBar)
     }
@@ -491,6 +506,7 @@ class StreamForgePlayerView @JvmOverloads constructor(
 
     private fun createBackButton(): FrameLayout {
         val size = dpToPx(40f).toInt()
+        val iconSize = dpToPx(24f).toInt()
         return FrameLayout(context).apply {
             layoutParams = LinearLayout.LayoutParams(size, size)
             background = GradientDrawable().apply {
@@ -502,13 +518,12 @@ class StreamForgePlayerView @JvmOverloads constructor(
             contentDescription = "Back"
             setOnClickListener { onBackClickListener?.invoke() }
 
-            addView(TextView(context).apply {
-                text = "\u276E" // ❮ left chevron
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-                typeface = Typeface.DEFAULT_BOLD
-                gravity = Gravity.CENTER
-                layoutParams = LayoutParams(size, size)
+            addView(ImageView(context).apply {
+                setImageDrawable(AppCompatResources.getDrawable(context, R.drawable.sf_ic_arrow_back))
+                setColorFilter(Color.WHITE)
+                layoutParams = LayoutParams(iconSize, iconSize).apply {
+                    gravity = Gravity.CENTER
+                }
             })
         }
     }
@@ -558,6 +573,7 @@ class StreamForgePlayerView @JvmOverloads constructor(
     }
 
     private fun createViewerCount(): LinearLayout {
+        val iconSize = dpToPx(16f).toInt()
         return LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -569,14 +585,12 @@ class StreamForgePlayerView @JvmOverloads constructor(
             }
 
             // Eye icon
-            addView(TextView(context).apply {
-                text = "\uD83D\uDC41" // 👁 eye emoji
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
+            addView(ImageView(context).apply {
+                setImageDrawable(AppCompatResources.getDrawable(context, R.drawable.sf_ic_visibility))
+                setColorFilter(Color.WHITE)
+                layoutParams = LinearLayout.LayoutParams(iconSize, iconSize).apply {
                     marginEnd = dpToPx(4f).toInt()
+                    gravity = Gravity.CENTER_VERTICAL
                 }
             })
 
@@ -681,6 +695,7 @@ class StreamForgePlayerView @JvmOverloads constructor(
 
     private fun createVolumeButton(): FrameLayout {
         val size = dpToPx(40f).toInt()
+        val iconSize = dpToPx(24f).toInt()
         return FrameLayout(context).apply {
             layoutParams = LinearLayout.LayoutParams(size, size)
             isClickable = true
@@ -688,11 +703,13 @@ class StreamForgePlayerView @JvmOverloads constructor(
             contentDescription = if (isMuted) "Unmute" else "Mute"
             setOnClickListener { onVolumeClickListener?.invoke() }
 
-            addView(TextView(context).apply {
-                text = if (isMuted) "\uD83D\uDD07" else "\uD83D\uDD0A" // 🔇 or 🔊
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
-                gravity = Gravity.CENTER
-                layoutParams = LayoutParams(size, size)
+            addView(ImageView(context).apply {
+                val iconRes = if (isMuted) R.drawable.sf_ic_volume_off else R.drawable.sf_ic_volume_up
+                setImageDrawable(AppCompatResources.getDrawable(context, iconRes))
+                setColorFilter(Color.WHITE)
+                layoutParams = LayoutParams(iconSize, iconSize).apply {
+                    gravity = Gravity.CENTER
+                }
             })
         }
     }
@@ -732,14 +749,13 @@ class StreamForgePlayerView @JvmOverloads constructor(
             })
 
             // Dropdown arrow
-            addView(TextView(context).apply {
-                text = " \u25BE" // ▾
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                )
+            val arrowSize = dpToPx(16f).toInt()
+            addView(ImageView(context).apply {
+                setImageDrawable(AppCompatResources.getDrawable(context, R.drawable.sf_ic_arrow_drop_down))
+                setColorFilter(Color.WHITE)
+                layoutParams = LinearLayout.LayoutParams(arrowSize, arrowSize).apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                }
             })
         }
     }
@@ -757,31 +773,13 @@ class StreamForgePlayerView @JvmOverloads constructor(
             visibility = View.GONE
             setOnClickListener { onPipClickListener?.invoke() }
 
-            addView(TextView(context).apply {
-                text = "\u29C9" // ⧉ PiP icon
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-                gravity = Gravity.CENTER
-                layoutParams = LayoutParams(size, size)
-            })
-        }
-    }
-
-    private fun createFullscreenButton(): FrameLayout {
-        val size = dpToPx(36f).toInt()
-        return FrameLayout(context).apply {
-            layoutParams = LinearLayout.LayoutParams(size, size)
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Fullscreen"
-            setOnClickListener { onFullscreenClickListener?.invoke() }
-
-            addView(TextView(context).apply {
-                text = "\u26F6" // ⛶ fullscreen icon
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-                gravity = Gravity.CENTER
-                layoutParams = LayoutParams(size, size)
+            val iconSize = dpToPx(22f).toInt()
+            addView(ImageView(context).apply {
+                setImageDrawable(AppCompatResources.getDrawable(context, R.drawable.sf_ic_picture_in_picture))
+                setColorFilter(Color.WHITE)
+                layoutParams = LayoutParams(iconSize, iconSize).apply {
+                    gravity = Gravity.CENTER
+                }
             })
         }
     }

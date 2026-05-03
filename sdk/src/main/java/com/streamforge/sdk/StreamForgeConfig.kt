@@ -21,11 +21,13 @@ package com.streamforge.sdk
  * @property maxVideoHeight Maximum video height for adaptive bitrate selection.
  * @property bufferForPlaybackMs Minimum buffer before playback starts (ms).
  * @property bufferForPlaybackAfterRebufferMs Minimum buffer after rebuffer before playback resumes (ms).
+ * @property enableSse Enable SSE (Server-Sent Events) for real-time stream status. When false, uses polling only.
  */
 data class StreamForgeConfig(
     val baseUrl: String = Companion.BASE_URL,
     val enableLogging: Boolean = false,
     val trustAllCertificates: Boolean = false,
+    val enableSse: Boolean = false,
     // ABR (Adaptive Bitrate) configuration
     val minBitrateKbps: Int? = null,
     val maxBitrateKbps: Int? = null,
@@ -38,6 +40,7 @@ data class StreamForgeConfig(
         private var baseUrl: String = BASE_URL
         private var enableLogging: Boolean = false
         private var trustAllCertificates: Boolean = false
+        private var enableSse: Boolean = true
         private var minBitrateKbps: Int? = null
         private var maxBitrateKbps: Int? = null
         private var maxVideoWidth: Int? = null
@@ -48,6 +51,7 @@ data class StreamForgeConfig(
         fun baseUrl(url: String) = apply { this.baseUrl = url }
         fun enableLogging(enable: Boolean) = apply { this.enableLogging = enable }
         fun trustAllCertificates(trust: Boolean) = apply { this.trustAllCertificates = trust }
+        fun enableSse(enable: Boolean) = apply { this.enableSse = enable }
         fun minBitrateKbps(kbps: Int) = apply { this.minBitrateKbps = kbps }
         fun maxBitrateKbps(kbps: Int) = apply { this.maxBitrateKbps = kbps }
         fun maxVideoWidth(width: Int) = apply { this.maxVideoWidth = width }
@@ -60,6 +64,7 @@ data class StreamForgeConfig(
                 baseUrl = baseUrl,
                 enableLogging = enableLogging,
                 trustAllCertificates = trustAllCertificates,
+                enableSse = enableSse,
                 minBitrateKbps = minBitrateKbps,
                 maxBitrateKbps = maxBitrateKbps,
                 maxVideoWidth = maxVideoWidth,

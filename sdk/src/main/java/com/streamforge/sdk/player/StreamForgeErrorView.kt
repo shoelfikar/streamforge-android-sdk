@@ -9,7 +9,10 @@ import android.view.Gravity
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ImageView
 import android.widget.TextView
+import androidx.appcompat.content.res.AppCompatResources
+import com.streamforge.sdk.R
 import com.streamforge.sdk.exception.*
 
 /**
@@ -54,14 +57,11 @@ class StreamForgeErrorView(
         }
 
         // Error icon
-        val iconView = TextView(context).apply {
-            text = errorInfo.icon
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 48f)
-            gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
+        val iconSize = dp(48)
+        val iconView = ImageView(context).apply {
+            setImageDrawable(AppCompatResources.getDrawable(context, errorInfo.icon))
+            setColorFilter(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(iconSize, iconSize).apply {
                 gravity = Gravity.CENTER_HORIZONTAL
                 bottomMargin = dp(16)
             }
@@ -127,16 +127,19 @@ class StreamForgeErrorView(
         centerContainer.addView(buttonsRow)
 
         // Back arrow (top-left)
-        val backArrow = TextView(context).apply {
-            text = "❮"
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+        val arrowSize = dp(24)
+        val backArrow = FrameLayout(context).apply {
             setPadding(dp(16), dp(16), dp(16), dp(16))
             layoutParams = LayoutParams(
                 LayoutParams.WRAP_CONTENT,
                 LayoutParams.WRAP_CONTENT
             ).apply { gravity = Gravity.START or Gravity.TOP }
             setOnClickListener { onBackClickListener?.invoke() }
+            addView(ImageView(context).apply {
+                setImageDrawable(AppCompatResources.getDrawable(context, R.drawable.sf_ic_arrow_back))
+                setColorFilter(Color.WHITE)
+                layoutParams = LayoutParams(arrowSize, arrowSize)
+            })
         }
 
         addView(centerContainer)
@@ -165,7 +168,7 @@ class StreamForgeErrorView(
     private fun getErrorInfo(error: StreamForgeException): ErrorInfo {
         return when (error) {
             is SFAuthException -> ErrorInfo(
-                icon = "\uD83D\uDD12", // 🔒
+                icon = R.drawable.sf_ic_lock,
                 title = "Authentication Failed",
                 message = when {
                     error.message?.contains("revoked", ignoreCase = true) == true ->
@@ -180,7 +183,7 @@ class StreamForgeErrorView(
                 retryable = false
             )
             is SFNetworkException -> ErrorInfo(
-                icon = "\uD83D\uDCF6", // 📶
+                icon = R.drawable.sf_ic_signal_cellular,
                 title = "Connection Error",
                 message = when {
                     error.message?.contains("timeout", ignoreCase = true) == true ->
@@ -193,19 +196,19 @@ class StreamForgeErrorView(
                 retryable = true
             )
             is SFStreamNotFoundException -> ErrorInfo(
-                icon = "\uD83D\uDCFA", // 📺
+                icon = R.drawable.sf_ic_tv,
                 title = "Stream Not Found",
                 message = "The requested stream could not be found. It may have ended or the ID is incorrect.",
                 retryable = false
             )
             is SFInsufficientScopeException -> ErrorInfo(
-                icon = "\uD83D\uDEAB", // 🚫
+                icon = R.drawable.sf_ic_block,
                 title = "Permission Denied",
                 message = "Your API key does not have the required permissions to play this stream.",
                 retryable = false
             )
             else -> ErrorInfo(
-                icon = "⚠\uFE0F", // ⚠️
+                icon = R.drawable.sf_ic_warning,
                 title = "Playback Error",
                 message = error.message ?: "An unexpected error occurred. Please try again.",
                 retryable = true
@@ -222,7 +225,7 @@ class StreamForgeErrorView(
     }
 
     private data class ErrorInfo(
-        val icon: String,
+        val icon: Int,
         val title: String,
         val message: String,
         val retryable: Boolean

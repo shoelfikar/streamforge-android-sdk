@@ -181,6 +181,7 @@ class StreamForgePlayer internal constructor(
             }
 
             override fun onStreamStatusChanged(isLive: Boolean) {
+                view?.setLiveStatus(isLive)
                 delegate?.onStreamStatusChanged(isLive)
             }
 

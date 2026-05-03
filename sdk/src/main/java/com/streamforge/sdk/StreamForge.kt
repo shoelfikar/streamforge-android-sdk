@@ -49,11 +49,11 @@ object StreamForge {
     @Volatile private var _isInitialized = false
     @Volatile private var _apiClient: ApiClient? = null
     @Volatile private var _tenantConfig: TenantConfig? = null
-    @Volatile private var _apiKey: String? = null
+    @Volatile internal var _apiKey: String? = null
     @Volatile private var _streamUrl: String? = null
     @Volatile private var _streamTitle: String? = null
     @Volatile private var _streamId: String? = null
-    @Volatile private var _config: StreamForgeConfig? = null
+    @Volatile internal var _config: StreamForgeConfig? = null
 
     /** Whether the SDK has been successfully initialized. */
     val isInitialized: Boolean get() = _isInitialized

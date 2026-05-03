@@ -33,9 +33,9 @@ internal class FullscreenManager {
                     else -> ViewGroup.LayoutParams(lp)
                 }
             }
-            view.layoutParams = ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
+            view.layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
             )
         }
 

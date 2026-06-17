@@ -18,9 +18,13 @@ class StreamForgePlayer internal constructor(
     private val retryManager = RetryManager()
     private val fullscreenManager = FullscreenManager()
     private val qualityManager = QualityManager()
-    private val pipManager = PipManager()
+    private var dvrController: DvrController? = null
     private var view: StreamForgePlayerView? = null
     private var userListener: PlayerEventListener? = null
+
+    /** Currently-selected quality height: -1 = Auto, else a pinned rendition height. */
+    private var selectedHeight = -1
+    private var activeHeight = 0
 
     val currentPosition: Long get() = engine.currentPosition
     val duration: Long get() = engine.duration
@@ -30,6 +34,7 @@ class StreamForgePlayer internal constructor(
 
     init {
         engine.initialize(context, config)
+        engine.setEventListener(buildInternalListener())
     }
 
     fun attachView(playerView: StreamForgePlayerView) {
@@ -44,40 +49,50 @@ class StreamForgePlayer internal constructor(
 
     fun setEventListener(listener: PlayerEventListener?) {
         userListener = listener
-        engine.setEventListener(createInternalListener(listener))
         statusMonitor.setEventListener(listener)
     }
 
     /**
-     * Load the stream URL obtained during SDK init.
-     * Starts stream status polling automatically.
+     * Load the live stream resolved during SDK init, applying autoplay / initial
+     * mute from config, then start status monitoring and the DVR controller.
      */
     fun load(listener: PlayerEventListener? = null) {
-        listener?.let {
-            userListener = it
-            engine.setEventListener(createInternalListener(it))
-            statusMonitor.setEventListener(it)
-        }
-        val url = StreamForge.streamUrl
-            ?: throw IllegalStateException("Stream URL not available. Ensure StreamForge.init() was called with a valid streamId.")
-        retryManager.reset()
-        engine.loadStream(url, PlaybackProtocol.HLS)
+        listener?.let { userListener = it; statusMonitor.setEventListener(it) }
 
-        // Start status polling
+        val liveUrl = StreamForge.liveUrl ?: StreamForge.streamUrl
+            ?: throw IllegalStateException("Stream URL not available. Ensure StreamForge.init() was called with a valid streamId.")
+
+        retryManager.reset()
+
+        // Initial mute (mirror the embed `muted` param).
+        setMuted(config?.muted ?: false)
+
+        engine.loadSource(
+            url = liveUrl,
+            protocol = PlaybackProtocol.HLS,
+            isLive = true,
+            seekToMs = null,
+            resumePlay = config?.autoplay ?: true
+        )
+
         StreamForge.streamId?.let { statusMonitor.start(it) }
+
+        setupDvr()
     }
 
-    /**
-     * Load a custom URL directly (e.g. for testing or alternative streams).
-     */
+    /** Load a custom URL directly (e.g. for testing or alternative streams). */
     fun loadUrl(url: String, protocol: PlaybackProtocol = PlaybackProtocol.HLS) {
         retryManager.reset()
-        engine.loadStream(url, protocol)
+        engine.loadSource(url, protocol, isLive = true, seekToMs = null, resumePlay = true)
     }
 
-    /**
-     * Observe all SDK events as a Kotlin Flow.
-     */
+    /** Re-attempt playback after an error (wired to the error overlay's Retry button). */
+    fun retryPlayback() {
+        view?.clearError()
+        retryManager.reset()
+        engine.retry()
+    }
+
     fun observeEvents(): Flow<StreamForgeEvent> = EventBus.events
 
     var isMuted: Boolean = false
@@ -91,23 +106,50 @@ class StreamForgePlayer internal constructor(
     fun setMuted(muted: Boolean) {
         isMuted = muted
         engine.setMuted(muted)
-        view?.setMuteState(muted)
+        view?.onMuteChanged(muted)
     }
 
-    fun toggleMute() {
-        setMuted(!isMuted)
+    fun toggleMute() = setMuted(!isMuted)
+
+    // ── DVR (live-rewind) ──
+
+    private fun setupDvr() {
+        dvrController?.stop()
+        val controller = DvrController(
+            engine = engine,
+            loadLive = {
+                StreamForge.liveUrl?.let {
+                    engine.loadSource(it, PlaybackProtocol.HLS, isLive = true, seekToMs = null, resumePlay = true)
+                }
+            },
+            loadRewind = {
+                StreamForge.rewindUrl?.let {
+                    engine.loadSource(it, PlaybackProtocol.HLS, isLive = false, seekToMs = null, resumePlay = true)
+                }
+            },
+            trustAll = config?.trustAllCertificates ?: false,
+            onState = { state -> view?.onDvrState(state) }
+        )
+        dvrController = controller
+        controller.probe(StreamForge.rewindProbeUrl)
+        controller.start()
     }
+
+    internal fun dvrHandleSeek(timeSec: Double) = dvrController?.handleSeek(timeSec)
+    internal fun dvrJumpToLive() = dvrController?.jumpToLive()
 
     // ── Fullscreen ──
 
     fun enterFullscreen(activity: Activity) {
         fullscreenManager.enterFullscreen(activity, view)
+        view?.onFullscreenChanged(true)
         userListener?.onFullscreenChanged(true)
         EventBus.emit(StreamForgeEvent.FullscreenChanged(true))
     }
 
     fun exitFullscreen(activity: Activity) {
         fullscreenManager.exitFullscreen(activity, view)
+        view?.onFullscreenChanged(false)
         userListener?.onFullscreenChanged(false)
         EventBus.emit(StreamForgeEvent.FullscreenChanged(false))
     }
@@ -116,78 +158,65 @@ class StreamForgePlayer internal constructor(
         if (fullscreenManager.isFullscreen) exitFullscreen(activity) else enterFullscreen(activity)
     }
 
-    // ── Quality Selector ──
+    // ── Quality ──
 
-    fun getAvailableQualities(): List<QualityOption> {
-        return qualityManager.getAvailableQualities(engine.player)
-    }
+    fun getAvailableQualities(): List<QualityOption> = qualityManager.getAvailableQualities(engine.player)
 
     fun setQuality(option: QualityOption) {
         qualityManager.setQuality(engine.player, option)
+        selectedHeight = if (option.isAuto) -1 else option.height
     }
 
     fun setAutoQuality() {
         qualityManager.setAutoQuality(engine.player)
-    }
-
-    // ── Picture-in-Picture ──
-
-    fun isPipSupported(): Boolean = pipManager.isPipSupported(context)
-
-    fun enterPip(activity: Activity) {
-        pipManager.enterPip(activity, engine.player)
-    }
-
-    fun onPictureInPictureModeChanged(isInPip: Boolean) {
-        view?.onPipModeChanged(isInPip)
-        userListener?.onPipChanged(isInPip)
-        EventBus.emit(StreamForgeEvent.PipChanged(isInPip))
+        selectedHeight = -1
     }
 
     fun release() {
         retryManager.cancel()
         statusMonitor.stop()
+        dvrController?.stop()
         view?.detachEngine()
         view = null
         engine.release()
     }
 
-    /**
-     * Wraps the user's listener to add auto-retry on error.
-     * On READY/PLAYING, resets the retry counter.
-     */
-    private fun createInternalListener(delegate: PlayerEventListener?): PlayerEventListener {
-        return object : PlayerEventListener {
-            override fun onPlaybackStateChanged(state: PlaybackState) {
-                if (state == PlaybackState.READY || state == PlaybackState.PLAYING) {
-                    retryManager.reset()
+    /** Internal engine listener — drives the view and delegates to the user listener. */
+    private fun buildInternalListener(): PlayerEventListener = object : PlayerEventListener {
+        override fun onPlaybackStateChanged(state: PlaybackState) {
+            if (state == PlaybackState.READY || state == PlaybackState.PLAYING) {
+                retryManager.reset()
+            }
+            view?.onPlaybackStateChanged(state, engine.isPlaying)
+            userListener?.onPlaybackStateChanged(state)
+        }
+
+        override fun onPlayerReady() {
+            userListener?.onPlayerReady()
+        }
+
+        override fun onPlayerError(error: Exception) {
+            retryManager.retry(
+                action = { engine.retry() },
+                onGiveUp = {
+                    view?.showError(null)
+                    userListener?.onPlayerError(error)
                 }
-                delegate?.onPlaybackStateChanged(state)
-            }
+            )
+        }
 
-            override fun onPlayerReady() {
-                delegate?.onPlayerReady()
-            }
+        override fun onVideoSizeChanged(width: Int, height: Int) {
+            userListener?.onVideoSizeChanged(width, height)
+        }
 
-            override fun onPlayerError(error: Exception) {
-                retryManager.retry(
-                    action = { engine.retry() },
-                    onGiveUp = { delegate?.onPlayerError(error) }
-                )
-            }
+        override fun onStreamStatusChanged(isLive: Boolean) {
+            userListener?.onStreamStatusChanged(isLive)
+        }
 
-            override fun onVideoSizeChanged(width: Int, height: Int) {
-                delegate?.onVideoSizeChanged(width, height)
-            }
-
-            override fun onStreamStatusChanged(isLive: Boolean) {
-                view?.setLiveStatus(isLive)
-                delegate?.onStreamStatusChanged(isLive)
-            }
-
-            override fun onQualityChanged(width: Int, height: Int, bitrate: Int) {
-                delegate?.onQualityChanged(width, height, bitrate)
-            }
+        override fun onQualityChanged(width: Int, height: Int, bitrate: Int) {
+            activeHeight = height
+            view?.onQualityInfo(getAvailableQualities(), activeHeight, selectedHeight)
+            userListener?.onQualityChanged(width, height, bitrate)
         }
     }
 }

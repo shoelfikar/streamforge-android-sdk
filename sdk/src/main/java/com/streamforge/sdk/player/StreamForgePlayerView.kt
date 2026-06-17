@@ -1,792 +1,715 @@
 package com.streamforge.sdk.player
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.Context
-import android.content.res.Configuration
+import android.content.ContextWrapper
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Handler
+import android.os.Looper
 import android.util.AttributeSet
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.GestureDetector
+import android.view.MotionEvent
 import android.view.View
-import android.os.Handler
-import android.os.Looper
+import android.view.ViewGroup
+import android.view.animation.AccelerateDecelerateInterpolator
 import android.widget.FrameLayout
-import android.widget.LinearLayout
 import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.PopupWindow
+import android.widget.SeekBar
 import android.widget.TextView
 import androidx.appcompat.content.res.AppCompatResources
 import androidx.media3.ui.PlayerView
 import com.streamforge.sdk.R
+import java.net.URL
 
+/**
+ * Live embed player view — a 1:1 port of the StreamForge web embed player
+ * (`streamforge-frontend/src/app/embed/[token]/page.tsx`).
+ *
+ * Single responsive layout: bottom control bar (play/pause, volume, LIVE
+ * indicator, quality dropdown, fullscreen), a DVR live-rewind seekbar, and
+ * loading / buffering / error / big-play / center-action overlays — all brand
+ * themed. Controls auto-hide after 3s; tap toggles controls, double-tap toggles
+ * play/pause.
+ */
 class StreamForgePlayerView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
     defStyleAttr: Int = 0
 ) : FrameLayout(context, attrs, defStyleAttr) {
 
-    /** The player instance attached to this view. Set internally by SDK. */
+    /** The player instance attached to this view. Set internally by the SDK. */
     var player: StreamForgePlayer? = null
         internal set
 
-    /** Whether the title overlay is shown. Defaults to true. */
-    var showTitle: Boolean = true
-        set(value) {
-            field = value
-            rebuildOverlay()
-        }
+    // ── Theming ──
+    private var brandColor: Int = Color.parseColor(PlayerConstants.DEFAULT_BRAND_COLOR)
 
-    private var onBackClickListener: (() -> Unit)? = null
-    private var onQualityClickListener: (() -> Unit)? = null
-    private var onPipClickListener: (() -> Unit)? = null
-    private var onVolumeClickListener: (() -> Unit)? = null
+    // ── State ──
+    private var controlsEnabled = true
+    private var isPlaying = false
+    private var isLoading = true
+    private var isBuffering = false
+    private var hasError = false
+    private var hasPlayed = false
+    private var controlsVisible = true
+    private var isMuted = false
+    private var isFullscreen = false
 
-    private var overlayVisible = false
-    private val hideHandler = Handler(Looper.getMainLooper())
-    private val hideRunnable = Runnable { hideOverlay() }
-    private val overlayTimeoutMs = 4000L
+    private var dvrAvailable = false
+    private var dvrDuration = 0.0
+    private var seekableStart = 0.0
+    private var seekableEnd = 0.0
+    private var dvrCurrent = 0.0
+    private var isAtLiveEdge = true
+    private var userSeeking = false
 
-    // State
-    private var titleText: String = ""
-    private var subtitleText: String = ""
-    private var viewerCountText: String = ""
-    private var isLive: Boolean = false
-    private var isMuted: Boolean = false
-    private var currentQualityLabel: String = "Auto"
-    private var isPortrait: Boolean = true
+    private var levels: List<QualityOption> = emptyList()
+    private var currentQualityHeight = -1   // -1 = Auto
+    private var activeHeight = 0
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val hideRunnable = Runnable { hideControls() }
 
     // ── ExoPlayer surface ──
-    private val exoPlayerView: PlayerView = PlayerView(context).also {
+    private val exoPlayerView = PlayerView(context).also {
         it.layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
-        it.setShowNextButton(false)
-        it.setShowPreviousButton(false)
-        it.setShowFastForwardButton(false)
-        it.setShowRewindButton(false)
-        it.setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
         it.useController = false
+        it.setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
+        it.resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+        it.setBackgroundColor(Color.BLACK)
         addView(it)
     }
 
-    // ── Offline overlay ──
-    private val offlineOverlay: FrameLayout = FrameLayout(context).apply {
+    // ── Logo overlay (top-left) ──
+    private val logoView = ImageView(context).apply {
+        adjustViewBounds = true
+        layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, dp(22)).apply {
+            gravity = Gravity.TOP or Gravity.START
+            topMargin = dp(10); leftMargin = dp(12)
+        }
+        visibility = View.GONE
+    }.also { addView(it) }
+
+    // ── Big-play overlay (initial paused) ──
+    private val bigPlayView = FrameLayout(context).apply {
+        layoutParams = LayoutParams(dp(64), dp(64), Gravity.CENTER)
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(0x1FFFFFFF)
+            setStroke(dp(2), 0x33FFFFFF)
+        }
+        addView(ImageView(context).apply {
+            setImageDrawable(icon(R.drawable.sf_ic_play))
+            layoutParams = LayoutParams(dp(28), dp(28), Gravity.CENTER)
+        })
+        visibility = View.GONE
+    }.also { addView(it) }
+
+    // ── Center action overlay (YouTube-style play/pause ping) ──
+    private val centerActionIcon = ImageView(context).apply {
+        layoutParams = LayoutParams(dp(32), dp(32), Gravity.CENTER)
+    }
+    private val centerActionView = FrameLayout(context).apply {
+        layoutParams = LayoutParams(dp(64), dp(64), Gravity.CENTER)
+        background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x99000000.toInt()) }
+        addView(centerActionIcon)
+        visibility = View.GONE
+    }.also { addView(it) }
+
+    // ── Loading overlay ──
+    private val loadingPing = PingRingView(context, brandColor).apply {
+        layoutParams = LayoutParams(dp(40), dp(40), Gravity.CENTER)
+    }
+    private val loadingSpinner = SpinnerView(context, brandColor).apply {
+        layoutParams = LayoutParams(dp(40), dp(40), Gravity.CENTER)
+    }
+    private val loadingText = TextView(context).apply {
+        text = "Connecting to stream…"
+        setTextColor(0xFF9CA3AF.toInt())
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(12); gravity = Gravity.CENTER }
+        gravity = Gravity.CENTER
+    }
+    private val loadingOverlay = FrameLayout(context).apply {
         layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
         setBackgroundColor(0xCC000000.toInt())
-        visibility = View.GONE
-
-        val label = TextView(context).apply {
-            text = "Stream is offline"
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-            typeface = Typeface.DEFAULT_BOLD
+        val col = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.CENTER
-            }
+            layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+            addView(FrameLayout(context).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply { gravity = Gravity.CENTER }
+                addView(loadingPing); addView(loadingSpinner)
+            })
+            addView(loadingText)
         }
-        addView(label)
+        addView(col)
     }.also { addView(it) }
 
-    // ── Overlay container ──
-    private val overlayContainer: FrameLayout = FrameLayout(context).apply {
+    // ── Buffering overlay (spinner only, transparent) ──
+    private val bufferingSpinner = SpinnerView(context, brandColor).apply {
+        layoutParams = LayoutParams(dp(40), dp(40), Gravity.CENTER)
+    }
+    private val bufferingOverlay = FrameLayout(context).apply {
         layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+        addView(bufferingSpinner)
         visibility = View.GONE
     }.also { addView(it) }
+
+    // ── Error overlay ──
+    private val errorText = TextView(context).apply {
+        setTextColor(0xFFD1D5DB.toInt())
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        gravity = Gravity.CENTER
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(10) }
+    }
+    private val errorOverlay = FrameLayout(context).apply {
+        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+        setBackgroundColor(0xCC000000.toInt())
+        val col = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            addView(ImageView(context).apply {
+                setImageDrawable(icon(R.drawable.sf_ic_warning))
+                setColorFilter(0xFFF59E0B.toInt())
+                layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply { gravity = Gravity.CENTER_HORIZONTAL }
+            })
+            addView(errorText)
+            addView(buildRetryButton())
+        }
+        addView(col)
+        visibility = View.GONE
+    }.also { addView(it) }
+
+    // ── DVR seekbar (above the controls bar) ──
+    private val seekBubble = TextView(context).apply {
+        setTextColor(Color.WHITE)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        setPadding(dp(8), dp(3), dp(8), dp(3))
+        background = GradientDrawable().apply { cornerRadius = dp(6).toFloat(); setColor(0xD9000000.toInt()) }
+        visibility = View.GONE
+    }
+    private val dvrSeekBar = SeekBar(context).apply {
+        max = 1000
+        progressTintList = android.content.res.ColorStateList.valueOf(brandColor)
+        thumbTintList = android.content.res.ColorStateList.valueOf(brandColor)
+        progressBackgroundTintList = android.content.res.ColorStateList.valueOf(0x4DFFFFFF)
+        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM)
+    }
+    private val seekbarContainer = FrameLayout(context).apply {
+        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply {
+            bottomMargin = dp(52); leftMargin = dp(12); rightMargin = dp(12)
+        }
+        addView(dvrSeekBar)
+        addView(seekBubble, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
+        visibility = View.GONE
+    }.also { addView(it) }
+
+    // ── Controls bar ──
+    private lateinit var playButton: ImageView
+    private lateinit var muteButton: ImageView
+    private lateinit var volumeSlider: SeekBar
+    private lateinit var liveDot: View
+    private lateinit var liveText: TextView
+    private lateinit var liveButton: LinearLayout
+    private lateinit var qualityGroup: LinearLayout
+    private lateinit var qualityLabel: TextView
+    private lateinit var fullscreenButton: ImageView
+    private val controlsBar: FrameLayout = buildControlsBar()
+
+    // ── Gestures ──
+    private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
+        override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+            if (controlsEnabled) toggleControls()
+            return true
+        }
+        override fun onDoubleTap(e: MotionEvent): Boolean {
+            togglePlay()
+            return true
+        }
+    })
 
     init {
-        isPortrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
-        rebuildOverlay()
-        setOnClickListener { toggleOverlay() }
+        addView(controlsBar)
+        setOnTouchListener { _, ev -> gestureDetector.onTouchEvent(ev) }
+        applyTheme()
+        startStallPoll()
     }
 
-    override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
-        val nowPortrait = newConfig.orientation == Configuration.ORIENTATION_PORTRAIT
-        if (nowPortrait != isPortrait) {
-            isPortrait = nowPortrait
-            rebuildOverlay()
+    // ═══════════════════════════════════════════════════
+    //  Public / internal API
+    // ═══════════════════════════════════════════════════
+
+    fun setBrandColor(hex: String) {
+        var c = hex.trim()
+        if (!c.startsWith("#")) c = "#$c"
+        brandColor = try { Color.parseColor(c) } catch (_: Exception) {
+            Color.parseColor(PlayerConstants.DEFAULT_BRAND_COLOR)
         }
+        applyTheme()
     }
 
-    // ── Public API ──
-
-    fun setTitle(title: String?) {
-        titleText = title ?: ""
-        rebuildOverlay()
+    fun setLogo(url: String?, opacity: Float) {
+        logoView.alpha = opacity.coerceIn(0f, 1f)
+        if (url.isNullOrBlank()) { logoView.visibility = View.GONE; return }
+        loadLogo(url)
     }
 
-    fun setSubtitle(subtitle: String?) {
-        subtitleText = subtitle ?: ""
-        rebuildOverlay()
+    fun setControlsEnabled(enabled: Boolean) {
+        controlsEnabled = enabled
+        controlsBar.visibility = if (enabled) View.VISIBLE else View.GONE
+        if (!enabled) seekbarContainer.visibility = View.GONE
     }
 
-    fun setViewerCount(count: String?) {
-        viewerCountText = count ?: ""
-        rebuildOverlay()
+    internal fun attachEngine(engine: PlayerEngine) { exoPlayerView.player = engine.player }
+    internal fun detachEngine() { exoPlayerView.player = null }
+    fun setResizeMode(resizeMode: Int) { exoPlayerView.resizeMode = resizeMode }
+
+    internal fun onPlaybackStateChanged(state: PlaybackState, playing: Boolean) {
+        isPlaying = playing
+        when (state) {
+            PlaybackState.READY, PlaybackState.PLAYING -> { isLoading = false; hasError = false }
+            PlaybackState.LOADING -> { /* keep loading overlay */ }
+            else -> {}
+        }
+        if (playing) hasPlayed = true
+        updatePlayButton()
+        updateOverlays()
+        if (playing) scheduleHide() else showControls()
     }
 
-    fun setLiveStatus(live: Boolean) {
-        isLive = live
-        offlineOverlay.visibility = if (live) View.GONE else View.VISIBLE
-        rebuildOverlay()
+    internal fun showError(message: String?) {
+        hasError = true
+        isLoading = false
+        errorText.text = message ?: "Network error — stream may be offline"
+        updateOverlays()
+        showControls()
     }
 
-    fun setMuteState(muted: Boolean) {
+    internal fun clearError() { hasError = false; updateOverlays() }
+
+    internal fun onDvrState(state: DvrState) {
+        dvrAvailable = state.available
+        dvrDuration = state.dvrDuration
+        seekableStart = state.seekableStart
+        seekableEnd = state.seekableEnd
+        dvrCurrent = state.currentTime
+        isAtLiveEdge = state.isAtLiveEdge
+        updateLiveIndicator()
+        updateSeekbar()
+    }
+
+    internal fun onQualityInfo(available: List<QualityOption>, activeH: Int, currentHeight: Int) {
+        levels = available.filter { !it.isAuto }
+        activeHeight = activeH
+        currentQualityHeight = currentHeight
+        updateQualityButton()
+    }
+
+    internal fun onMuteChanged(muted: Boolean) {
         isMuted = muted
-        rebuildOverlay()
+        muteButton.setImageDrawable(icon(if (muted) R.drawable.sf_ic_vol_off else R.drawable.sf_ic_vol_on))
+        if (!muted && volumeSlider.progress == 0) volumeSlider.progress = 100
     }
 
-    fun setCurrentQualityLabel(label: String) {
-        currentQualityLabel = label
-        rebuildOverlay()
-    }
-
-    fun setOnBackClickListener(listener: () -> Unit) {
-        onBackClickListener = listener
-    }
-
-    fun setOnQualityClickListener(listener: () -> Unit) {
-        onQualityClickListener = listener
-    }
-
-    fun setOnPipClickListener(listener: () -> Unit) {
-        onPipClickListener = listener
-    }
-
-    fun setOnVolumeClickListener(listener: () -> Unit) {
-        onVolumeClickListener = listener
-    }
-
-    fun setPipButtonVisible(visible: Boolean) {
-        overlayContainer.findViewWithTag<View>("pip_button")?.visibility =
-            if (visible) View.VISIBLE else View.GONE
-    }
-
-    fun showQualitySelector(
-        qualities: List<QualityOption>,
-        currentQuality: QualityOption,
-        onSelected: (QualityOption) -> Unit
-    ) {
-        val activity = context as? Activity ?: return
-        val labels = qualities.map { option ->
-            if (option.isAuto) "Auto" else "${option.label} (${option.width}x${option.height})"
-        }.toTypedArray()
-
-        val checkedIndex = qualities.indexOfFirst {
-            it.isAuto == currentQuality.isAuto && it.height == currentQuality.height
-        }
-
-        AlertDialog.Builder(activity)
-            .setTitle("Video Quality")
-            .setSingleChoiceItems(labels, checkedIndex) { dialog, which ->
-                onSelected(qualities[which])
-                dialog.dismiss()
-            }
-            .show()
-    }
-
-    internal fun onPipModeChanged(isInPip: Boolean) {
-        if (isInPip) hideOverlay()
-    }
-
-    internal fun attachEngine(engine: PlayerEngine) {
-        exoPlayerView.player = engine.player
-    }
-
-    internal fun detachEngine() {
-        exoPlayerView.player = null
-    }
-
-    fun setResizeMode(resizeMode: Int) {
-        exoPlayerView.resizeMode = resizeMode
-    }
-
-    // ── Overlay visibility ──
-
-    private fun toggleOverlay() {
-        if (overlayVisible) hideOverlay() else showOverlay()
-    }
-
-    private fun showOverlay() {
-        overlayVisible = true
-        overlayContainer.visibility = View.VISIBLE
-        hideHandler.removeCallbacks(hideRunnable)
-        hideHandler.postDelayed(hideRunnable, overlayTimeoutMs)
-    }
-
-    private fun hideOverlay() {
-        overlayVisible = false
-        overlayContainer.visibility = View.GONE
-        hideHandler.removeCallbacks(hideRunnable)
-    }
-
-    // ── Build overlay based on orientation ──
-
-    private fun rebuildOverlay() {
-        overlayContainer.removeAllViews()
-        if (isPortrait) {
-            buildPortraitOverlay()
-        } else {
-            buildLandscapeOverlay()
-        }
-        // Restore visibility state
-        overlayContainer.visibility = if (overlayVisible) View.VISIBLE else View.GONE
+    internal fun onFullscreenChanged(full: Boolean) {
+        isFullscreen = full
+        fullscreenButton.setImageDrawable(
+            icon(if (full) R.drawable.sf_ic_fs_exit else R.drawable.sf_ic_fs_enter)
+        )
     }
 
     // ═══════════════════════════════════════════════════
-    //  PORTRAIT LAYOUT
+    //  Controls bar construction
     // ═══════════════════════════════════════════════════
 
-    private fun buildPortraitOverlay() {
-        // Top gradient overlay
-        val topGradient = View(context).apply {
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dpToPx(120f).toInt()).apply {
-                gravity = Gravity.TOP
-            }
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(0xCC000000.toInt(), 0x00000000)
-            )
-        }
-        overlayContainer.addView(topGradient)
-
-        // Bottom gradient overlay
-        val bottomGradient = View(context).apply {
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dpToPx(180f).toInt()).apply {
-                gravity = Gravity.BOTTOM
-            }
+    private fun buildControlsBar(): FrameLayout {
+        val bar = FrameLayout(context).apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM)
             background = GradientDrawable(
                 GradientDrawable.Orientation.BOTTOM_TOP,
-                intArrayOf(0xCC000000.toInt(), 0x00000000)
+                intArrayOf(0xCC000000.toInt(), 0x66000000, 0x00000000)
             )
-        }
-        overlayContainer.addView(bottomGradient)
-
-        // ── Top row: back button (left) + LIVE badge + viewer count (right) ──
-        val topBar = FrameLayout(context).apply {
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.TOP
-                topMargin = dpToPx(16f).toInt()
-                leftMargin = dpToPx(16f).toInt()
-                rightMargin = dpToPx(16f).toInt()
-            }
+            setPadding(dp(12), dp(64), dp(12), dp(12))
         }
 
-        // Back button
-        topBar.addView(createBackButton().apply {
-            layoutParams = LayoutParams(dpToPx(40f).toInt(), dpToPx(40f).toInt()).apply {
-                gravity = Gravity.START or Gravity.CENTER_VERTICAL
-            }
-        })
-
-        // Right section: LIVE badge + viewer count
-        val topRight = LinearLayout(context).apply {
+        val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-            }
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
         }
 
-        if (isLive) {
-            topRight.addView(createLiveBadge())
-        }
+        // Play / pause
+        playButton = ctrlIcon(R.drawable.sf_ic_play).apply { setOnClickListener { togglePlay() } }
+        row.addView(playButton, lp(dp(24), dp(24)).apply { marginEnd = dp(16) })
 
-        if (viewerCountText.isNotEmpty()) {
-            topRight.addView(createViewerCount())
-        }
-
-        topBar.addView(topRight)
-        overlayContainer.addView(topBar)
-
-        // ── Bottom section ──
-        val bottomSection = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.BOTTOM
-                bottomMargin = dpToPx(16f).toInt()
-                leftMargin = dpToPx(16f).toInt()
-                rightMargin = dpToPx(16f).toInt()
-            }
-        }
-
-        // Info card (title + subtitle)
-        if (showTitle && (titleText.isNotEmpty() || subtitleText.isNotEmpty())) {
-            bottomSection.addView(createInfoCard())
-        }
-
-        // Bottom controls row
-        val bottomControls = FrameLayout(context).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LayoutParams.WRAP_CONTENT
-            ).apply {
-                topMargin = dpToPx(12f).toInt()
-            }
-        }
-
-        // Volume button (left)
-        bottomControls.addView(createVolumeButton().apply {
-            layoutParams = LayoutParams(dpToPx(40f).toInt(), dpToPx(40f).toInt()).apply {
-                gravity = Gravity.START or Gravity.CENTER_VERTICAL
-            }
-        })
-
-        // Right controls: quality + fullscreen
-        val rightControls = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-            }
-        }
-
-        rightControls.addView(createQualityButton())
-
-        bottomControls.addView(rightControls)
-        bottomSection.addView(bottomControls)
-        overlayContainer.addView(bottomSection)
-    }
-
-    // ═══════════════════════════════════════════════════
-    //  LANDSCAPE LAYOUT
-    // ═══════════════════════════════════════════════════
-
-    private fun buildLandscapeOverlay() {
-        // Top gradient
-        val topGradient = View(context).apply {
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dpToPx(100f).toInt()).apply {
-                gravity = Gravity.TOP
-            }
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(0xCC000000.toInt(), 0x00000000)
-            )
-        }
-        overlayContainer.addView(topGradient)
-
-        // Bottom gradient
-        val bottomGradient = View(context).apply {
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dpToPx(80f).toInt()).apply {
-                gravity = Gravity.BOTTOM
-            }
-            background = GradientDrawable(
-                GradientDrawable.Orientation.BOTTOM_TOP,
-                intArrayOf(0xCC000000.toInt(), 0x00000000)
-            )
-        }
-        overlayContainer.addView(bottomGradient)
-
-        // ── Top bar: [Back] [Icon] [Title/Subtitle] ... [LIVE] [Viewers] ──
-        val topBar = FrameLayout(context).apply {
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.TOP
-                topMargin = dpToPx(16f).toInt()
-                leftMargin = dpToPx(20f).toInt()
-                rightMargin = dpToPx(20f).toInt()
-            }
-        }
-
-        // Left section: back + icon + title/subtitle
-        val topLeft = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.START or Gravity.CENTER_VERTICAL
-            }
-        }
-
-        topLeft.addView(createBackButton())
-
-        if (showTitle && (titleText.isNotEmpty() || subtitleText.isNotEmpty())) {
-            // SDK icon
-            topLeft.addView(createSdkIcon().apply {
-                val lp = layoutParams as? LinearLayout.LayoutParams
-                    ?: LinearLayout.LayoutParams(dpToPx(36f).toInt(), dpToPx(36f).toInt())
-                lp.marginStart = dpToPx(12f).toInt()
-                layoutParams = lp
-            })
-
-            // Title + Subtitle vertical
-            val titleBlock = LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    marginStart = dpToPx(10f).toInt()
+        // Volume group (mute button + slider)
+        muteButton = ctrlIcon(R.drawable.sf_ic_vol_on).apply { setOnClickListener { player?.toggleMute() } }
+        row.addView(muteButton, lp(dp(24), dp(24)).apply { marginEnd = dp(6) })
+        volumeSlider = SeekBar(context).apply {
+            max = 100; progress = 100
+            progressTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            thumbTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(0x40FFFFFF)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
+                    if (fromUser) player?.setVolume(p / 100f)
                 }
-            }
-
-            if (titleText.isNotEmpty()) {
-                titleBlock.addView(TextView(context).apply {
-                    text = titleText
-                    setTextColor(Color.WHITE)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                    typeface = Typeface.DEFAULT_BOLD
-                    maxLines = 1
-                    setSingleLine(true)
-                })
-            }
-
-            if (subtitleText.isNotEmpty()) {
-                titleBlock.addView(TextView(context).apply {
-                    text = subtitleText
-                    setTextColor(0xFFAAAAAA.toInt())
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                    maxLines = 1
-                    setSingleLine(true)
-                })
-            }
-
-            topLeft.addView(titleBlock)
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) {}
+            })
         }
+        row.addView(volumeSlider, lp(dp(72), dp(24)).apply { marginEnd = dp(16) })
 
-        topBar.addView(topLeft)
-
-        // Right section: LIVE + viewer count
-        val topRight = LinearLayout(context).apply {
+        // LIVE indicator
+        liveDot = View(context).apply {
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFFEF4444.toInt()) }
+        }
+        liveText = TextView(context).apply {
+            text = "LIVE"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        liveButton = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-            }
+            addView(liveDot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(6) })
+            addView(liveText)
+            setOnClickListener { if (dvrAvailable && !isAtLiveEdge) player?.dvrJumpToLive() }
         }
+        row.addView(liveButton, lp(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
-        if (isLive) {
-            topRight.addView(createLiveBadge())
+        // Spacer
+        row.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+
+        // Quality dropdown
+        qualityLabel = TextView(context).apply {
+            text = "Auto"
+            setTextColor(0xB3FFFFFF.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
         }
-
-        if (viewerCountText.isNotEmpty()) {
-            topRight.addView(createViewerCount())
-        }
-
-        topBar.addView(topRight)
-        overlayContainer.addView(topBar)
-
-        // ── Bottom bar: [Volume] ... [Quality] [PiP] [Fullscreen] ──
-        val bottomBar = FrameLayout(context).apply {
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.BOTTOM
-                bottomMargin = dpToPx(16f).toInt()
-                leftMargin = dpToPx(20f).toInt()
-                rightMargin = dpToPx(20f).toInt()
-            }
-        }
-
-        // Volume (left)
-        bottomBar.addView(createVolumeButton().apply {
-            layoutParams = LayoutParams(dpToPx(40f).toInt(), dpToPx(40f).toInt()).apply {
-                gravity = Gravity.START or Gravity.CENTER_VERTICAL
-            }
-        })
-
-        // Right controls
-        val rightControls = LinearLayout(context).apply {
+        qualityGroup = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-            }
-        }
-
-        rightControls.addView(createQualityButton())
-
-        // PiP button
-        rightControls.addView(createPipButton())
-
-        bottomBar.addView(rightControls)
-        overlayContainer.addView(bottomBar)
-    }
-
-    // ═══════════════════════════════════════════════════
-    //  REUSABLE UI COMPONENTS
-    // ═══════════════════════════════════════════════════
-
-    private fun createBackButton(): FrameLayout {
-        val size = dpToPx(40f).toInt()
-        val iconSize = dpToPx(24f).toInt()
-        return FrameLayout(context).apply {
-            layoutParams = LinearLayout.LayoutParams(size, size)
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(0x55000000.toInt())
-            }
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Back"
-            setOnClickListener { onBackClickListener?.invoke() }
-
             addView(ImageView(context).apply {
-                setImageDrawable(AppCompatResources.getDrawable(context, R.drawable.sf_ic_arrow_back))
-                setColorFilter(Color.WHITE)
-                layoutParams = LayoutParams(iconSize, iconSize).apply {
-                    gravity = Gravity.CENTER
-                }
+                setImageDrawable(icon(R.drawable.sf_ic_settings))
+                layoutParams = LinearLayout.LayoutParams(dp(22), dp(22)).apply { marginEnd = dp(6) }
             })
-        }
-    }
-
-    private fun createLiveBadge(): LinearLayout {
-        return LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            val px6 = dpToPx(6f).toInt()
-            val px12 = dpToPx(12f).toInt()
-            setPadding(px12, px6, px12, px6)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                marginStart = dpToPx(8f).toInt()
-            }
-            background = GradientDrawable().apply {
-                cornerRadius = dpToPx(14f)
-                setColor(0xFFDC2626.toInt()) // Red
-            }
-
-            // Red dot
-            addView(View(context).apply {
-                val dotSize = dpToPx(6f).toInt()
-                layoutParams = LinearLayout.LayoutParams(dotSize, dotSize).apply {
-                    marginEnd = dpToPx(5f).toInt()
-                }
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(Color.WHITE)
-                }
-            })
-
-            // "LIVE" text
-            addView(TextView(context).apply {
-                text = "LIVE"
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                typeface = Typeface.DEFAULT_BOLD
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                )
-            })
-        }
-    }
-
-    private fun createViewerCount(): LinearLayout {
-        val iconSize = dpToPx(16f).toInt()
-        return LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                marginStart = dpToPx(10f).toInt()
-            }
-
-            // Eye icon
-            addView(ImageView(context).apply {
-                setImageDrawable(AppCompatResources.getDrawable(context, R.drawable.sf_ic_visibility))
-                setColorFilter(Color.WHITE)
-                layoutParams = LinearLayout.LayoutParams(iconSize, iconSize).apply {
-                    marginEnd = dpToPx(4f).toInt()
-                    gravity = Gravity.CENTER_VERTICAL
-                }
-            })
-
-            // Count text
-            addView(TextView(context).apply {
-                text = viewerCountText
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                )
-            })
-        }
-    }
-
-    private fun createSdkIcon(): FrameLayout {
-        val size = dpToPx(36f).toInt()
-        return FrameLayout(context).apply {
-            layoutParams = LinearLayout.LayoutParams(size, size)
-            background = GradientDrawable().apply {
-                cornerRadius = dpToPx(8f)
-                setColor(0xFF1A3A2A.toInt()) // Dark green
-            }
-
-            addView(TextView(context).apply {
-                text = "SDK"
-                setTextColor(0xFF4ADE80.toInt()) // Green text
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
-                typeface = Typeface.DEFAULT_BOLD
-                gravity = Gravity.CENTER
-                layoutParams = LayoutParams(size, size)
-            })
-        }
-    }
-
-    private fun createInfoCard(): LinearLayout {
-        return LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            val px14 = dpToPx(14f).toInt()
-            val px10 = dpToPx(10f).toInt()
-            setPadding(px14, px10, px14, px10)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-            background = GradientDrawable().apply {
-                cornerRadius = dpToPx(12f)
-                setColor(0xE61A1A2E.toInt()) // Dark semi-transparent
-            }
-
-            // SDK icon
-            addView(createSdkIcon().apply {
-                val lp = layoutParams as? LinearLayout.LayoutParams
-                    ?: LinearLayout.LayoutParams(dpToPx(40f).toInt(), dpToPx(40f).toInt())
-                lp.width = dpToPx(40f).toInt()
-                lp.height = dpToPx(40f).toInt()
-                layoutParams = lp
-            })
-
-            // Title + Subtitle
-            val textBlock = LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    marginStart = dpToPx(12f).toInt()
-                }
-            }
-
-            if (titleText.isNotEmpty()) {
-                textBlock.addView(TextView(context).apply {
-                    text = titleText
-                    setTextColor(Color.WHITE)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                    typeface = Typeface.DEFAULT_BOLD
-                    maxLines = 2
-                })
-            }
-
-            if (subtitleText.isNotEmpty()) {
-                textBlock.addView(TextView(context).apply {
-                    text = subtitleText
-                    setTextColor(0xFF999999.toInt())
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                    maxLines = 1
-                    setSingleLine(true)
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    ).apply {
-                        topMargin = dpToPx(2f).toInt()
-                    }
-                })
-            }
-
-            addView(textBlock)
-        }
-    }
-
-    private fun createVolumeButton(): FrameLayout {
-        val size = dpToPx(40f).toInt()
-        val iconSize = dpToPx(24f).toInt()
-        return FrameLayout(context).apply {
-            layoutParams = LinearLayout.LayoutParams(size, size)
-            isClickable = true
-            isFocusable = true
-            contentDescription = if (isMuted) "Unmute" else "Mute"
-            setOnClickListener { onVolumeClickListener?.invoke() }
-
-            addView(ImageView(context).apply {
-                val iconRes = if (isMuted) R.drawable.sf_ic_volume_off else R.drawable.sf_ic_volume_up
-                setImageDrawable(AppCompatResources.getDrawable(context, iconRes))
-                setColorFilter(Color.WHITE)
-                layoutParams = LayoutParams(iconSize, iconSize).apply {
-                    gravity = Gravity.CENTER
-                }
-            })
-        }
-    }
-
-    private fun createQualityButton(): LinearLayout {
-        return LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            val px10 = dpToPx(10f).toInt()
-            val px6 = dpToPx(6f).toInt()
-            setPadding(px10, px6, px10, px6)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                marginEnd = dpToPx(8f).toInt()
-            }
-            background = GradientDrawable().apply {
-                cornerRadius = dpToPx(6f)
-                setColor(0x55000000.toInt())
-            }
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Quality"
-            setOnClickListener { onQualityClickListener?.invoke() }
-
-            // Quality label (e.g., "1080p")
-            addView(TextView(context).apply {
-                text = currentQualityLabel
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                typeface = Typeface.DEFAULT_BOLD
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                )
-            })
-
-            // Dropdown arrow
-            val arrowSize = dpToPx(16f).toInt()
-            addView(ImageView(context).apply {
-                setImageDrawable(AppCompatResources.getDrawable(context, R.drawable.sf_ic_arrow_drop_down))
-                setColorFilter(Color.WHITE)
-                layoutParams = LinearLayout.LayoutParams(arrowSize, arrowSize).apply {
-                    gravity = Gravity.CENTER_VERTICAL
-                }
-            })
-        }
-    }
-
-    private fun createPipButton(): FrameLayout {
-        val size = dpToPx(36f).toInt()
-        return FrameLayout(context).apply {
-            layoutParams = LinearLayout.LayoutParams(size, size).apply {
-                marginEnd = dpToPx(8f).toInt()
-            }
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Picture-in-Picture"
-            tag = "pip_button"
+            addView(qualityLabel)
+            setOnClickListener { showQualityMenu() }
             visibility = View.GONE
-            setOnClickListener { onPipClickListener?.invoke() }
+        }
+        row.addView(qualityGroup, lp(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(16) })
 
-            val iconSize = dpToPx(22f).toInt()
+        // Fullscreen
+        fullscreenButton = ctrlIcon(R.drawable.sf_ic_fs_enter).apply {
+            setOnClickListener { findActivity()?.let { player?.toggleFullscreen(it) } }
+        }
+        row.addView(fullscreenButton, lp(dp(24), dp(24)))
+
+        bar.addView(row)
+        return bar
+    }
+
+    private fun buildRetryButton(): View {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(6).toFloat()
+                setColor(0x1AFFFFFF)
+                setStroke(dp(1), 0x33FFFFFF)
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(16); gravity = Gravity.CENTER_HORIZONTAL }
             addView(ImageView(context).apply {
-                setImageDrawable(AppCompatResources.getDrawable(context, R.drawable.sf_ic_picture_in_picture))
-                setColorFilter(Color.WHITE)
-                layoutParams = LayoutParams(iconSize, iconSize).apply {
-                    gravity = Gravity.CENTER
-                }
+                setImageDrawable(icon(R.drawable.sf_ic_refresh))
+                layoutParams = LinearLayout.LayoutParams(dp(14), dp(14)).apply { marginEnd = dp(6) }
             })
+            addView(TextView(context).apply {
+                text = "Retry"; setTextColor(Color.WHITE); setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            })
+            setOnClickListener { player?.retryPlayback() }
         }
     }
 
-    // ── Utility ──
+    // ═══════════════════════════════════════════════════
+    //  Quality popup (web-style dropdown)
+    // ═══════════════════════════════════════════════════
 
-    private fun dpToPx(dp: Float): Float {
-        return dp * context.resources.displayMetrics.density
+    private fun showQualityMenu() {
+        val menu = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(12).toFloat()
+                setColor(0xF2171717.toInt())
+                setStroke(dp(1), 0x1AFFFFFF)
+            }
+            val minW = dp(150)
+            layoutParams = ViewGroup.LayoutParams(minW, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        // Header
+        menu.addView(TextView(context).apply {
+            text = "QUALITY"
+            setTextColor(0xFF737373.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+        })
+
+        val popup = PopupWindow(menu, dp(160), ViewGroup.LayoutParams.WRAP_CONTENT, true)
+
+        // Auto
+        menu.addView(qualityOption("Auto", "ABR", currentQualityHeight == -1) {
+            player?.setAutoQuality(); currentQualityHeight = -1; updateQualityButton(); popup.dismiss()
+        })
+        // Per-level (descending)
+        for (lvl in levels.sortedByDescending { it.height }) {
+            val badge = "${(lvl.bitrate / 1000)} kbps"
+            menu.addView(qualityOption("${lvl.height}p", badge, currentQualityHeight == lvl.height) {
+                player?.setQuality(lvl); currentQualityHeight = lvl.height; updateQualityButton(); popup.dismiss()
+            })
+        }
+
+        popup.elevation = dp(8).toFloat()
+        popup.showAsDropDown(qualityGroup, 0, -(qualityGroup.height + dp(220)))
+        resetHideTimerWhileVisible()
+    }
+
+    private fun qualityOption(label: String, badge: String, selected: Boolean, onClick: () -> Unit): View {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            if (selected) setBackgroundColor(withAlpha(brandColor, 0.08f))
+            addView(TextView(context).apply {
+                text = label
+                setTextColor(if (selected) brandColor else 0xFFD1D5DB.toInt())
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            addView(TextView(context).apply {
+                text = badge
+                setTextColor(0xFF6B7280.toInt())
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            })
+            setOnClickListener { onClick() }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════
+    //  State → UI
+    // ═══════════════════════════════════════════════════
+
+    private fun togglePlay() {
+        val p = player ?: return
+        if (isPlaying) { p.pause(); showCenterAction(R.drawable.sf_ic_pause) }
+        else { p.play(); hasPlayed = true; showCenterAction(R.drawable.sf_ic_play) }
+    }
+
+    private fun updatePlayButton() {
+        playButton.setImageDrawable(icon(if (isPlaying) R.drawable.sf_ic_pause else R.drawable.sf_ic_play))
+    }
+
+    private fun updateLiveIndicator() {
+        val atEdge = isAtLiveEdge
+        liveText.setTextColor(if (atEdge) Color.WHITE else 0x80FFFFFF.toInt())
+        (liveDot.background as? GradientDrawable)?.setColor(
+            if (atEdge) 0xFFEF4444.toInt() else 0xFFA3A3A3.toInt()
+        )
+    }
+
+    private fun updateQualityButton() {
+        qualityGroup.visibility = if (levels.size > 1) View.VISIBLE else View.GONE
+        qualityLabel.text = when {
+            currentQualityHeight == -1 && activeHeight > 0 -> "Auto (${activeHeight}p)"
+            currentQualityHeight == -1 -> "Auto"
+            else -> "${currentQualityHeight}p"
+        }
+    }
+
+    private fun updateSeekbar() {
+        val visible = controlsEnabled && dvrAvailable && dvrDuration > PlayerConstants.DVR_SEEKBAR_MIN_DURATION_S
+        seekbarContainer.visibility = if (visible && (controlsVisible || !isPlaying)) View.VISIBLE else View.GONE
+        if (!visible || userSeeking) return
+        val pct = if (dvrDuration > 0) ((dvrCurrent - seekableStart) / dvrDuration) else 0.0
+        dvrSeekBar.progress = (pct.coerceIn(0.0, 1.0) * 1000).toInt()
+    }
+
+    private fun updateOverlays() {
+        loadingOverlay.visibility = if (isLoading && !hasError) View.VISIBLE else View.GONE
+        bufferingOverlay.visibility = if (isBuffering && !isLoading && !hasError) View.VISIBLE else View.GONE
+        errorOverlay.visibility = if (hasError) View.VISIBLE else View.GONE
+        bigPlayView.visibility =
+            if (!hasPlayed && !isPlaying && !isLoading && !isBuffering && !hasError && controlsEnabled)
+                View.VISIBLE else View.GONE
+    }
+
+    private fun showCenterAction(iconRes: Int) {
+        centerActionIcon.setImageDrawable(icon(iconRes))
+        centerActionView.visibility = View.VISIBLE
+        centerActionView.scaleX = 0.8f; centerActionView.scaleY = 0.8f; centerActionView.alpha = 1f
+        centerActionView.animate()
+            .scaleX(1.5f).scaleY(1.5f).alpha(0f)
+            .setDuration(PlayerConstants.CENTER_ACTION_MS)
+            .setInterpolator(AccelerateDecelerateInterpolator())
+            .withEndAction { centerActionView.visibility = View.GONE }
+            .start()
+    }
+
+    // ── Controls visibility ──
+
+    private fun toggleControls() { if (controlsVisible) hideControls() else showControls() }
+
+    private fun showControls() {
+        controlsVisible = true
+        if (controlsEnabled) controlsBar.visibility = View.VISIBLE
+        updateSeekbar()
+        scheduleHide()
+    }
+
+    private fun hideControls() {
+        if (!isPlaying) return // keep controls while paused (matches web)
+        controlsVisible = false
+        controlsBar.visibility = View.GONE
+        seekbarContainer.visibility = View.GONE
+        mainHandler.removeCallbacks(hideRunnable)
+    }
+
+    private fun scheduleHide() {
+        mainHandler.removeCallbacks(hideRunnable)
+        if (isPlaying) mainHandler.postDelayed(hideRunnable, PlayerConstants.CONTROLS_HIDE_MS)
+    }
+
+    private fun resetHideTimerWhileVisible() {
+        controlsVisible = true
+        scheduleHide()
+    }
+
+    // ── DVR seekbar listener ──
+
+    private fun initSeekbarListener() {
+        dvrSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                val newTime = seekableStart + (p / 1000.0) * dvrDuration
+                val behind = (seekableEnd - newTime).coerceAtLeast(0.0)
+                seekBubble.text = "-" + formatOffset(behind)
+                seekBubble.visibility = View.VISIBLE
+                seekBubble.translationX = ((p / 1000f) * dvrSeekBar.width) - seekBubble.width / 2f
+            }
+            override fun onStartTrackingTouch(sb: SeekBar) { userSeeking = true; mainHandler.removeCallbacks(hideRunnable) }
+            override fun onStopTrackingTouch(sb: SeekBar) {
+                userSeeking = false
+                seekBubble.visibility = View.GONE
+                val newTime = seekableStart + (sb.progress / 1000.0) * dvrDuration
+                player?.dvrHandleSeek(newTime)
+                scheduleHide()
+            }
+        })
+    }
+
+    // ── Stall detector (buffering overlay, progress-based) ──
+
+    private var lastPos = -1L
+    private var lastAdvanceAt = 0L
+    private val stallRunnable = object : Runnable {
+        override fun run() {
+            val p = player
+            if (p != null && !isLoading && !hasError) {
+                val pos = p.currentPosition
+                val now = System.currentTimeMillis()
+                if (p.isPlaying) {
+                    if (pos == lastPos) {
+                        if (now - lastAdvanceAt > PlayerConstants.STALL_THRESHOLD_MS && !isBuffering) {
+                            isBuffering = true; updateOverlays()
+                        }
+                    } else {
+                        lastPos = pos; lastAdvanceAt = now
+                        if (isBuffering) { isBuffering = false; updateOverlays() }
+                    }
+                } else if (isBuffering) { isBuffering = false; updateOverlays() }
+            }
+            mainHandler.postDelayed(this, PlayerConstants.STALL_POLL_MS)
+        }
+    }
+
+    private fun startStallPoll() {
+        initSeekbarListener()
+        lastAdvanceAt = System.currentTimeMillis()
+        mainHandler.postDelayed(stallRunnable, PlayerConstants.STALL_POLL_MS)
+    }
+
+    override fun onDetachedFromWindow() {
+        mainHandler.removeCallbacksAndMessages(null)
+        super.onDetachedFromWindow()
+    }
+
+    // ═══════════════════════════════════════════════════
+    //  Helpers
+    // ═══════════════════════════════════════════════════
+
+    private fun applyTheme() {
+        dvrSeekBar.progressTintList = android.content.res.ColorStateList.valueOf(brandColor)
+        dvrSeekBar.thumbTintList = android.content.res.ColorStateList.valueOf(brandColor)
+        loadingSpinner.setBrandColor(brandColor)
+        bufferingSpinner.setBrandColor(brandColor)
+        loadingPing.setBrandColor(brandColor)
+    }
+
+    private fun ctrlIcon(res: Int): ImageView = ImageView(context).apply {
+        setImageDrawable(icon(res))
+        isClickable = true; isFocusable = true
+        scaleType = ImageView.ScaleType.FIT_CENTER
+    }
+
+    private fun icon(res: Int) = AppCompatResources.getDrawable(context, res)
+
+    private fun lp(w: Int, h: Int) = LinearLayout.LayoutParams(w, h)
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    private fun withAlpha(color: Int, alpha: Float): Int =
+        Color.argb((alpha * 255).toInt(), Color.red(color), Color.green(color), Color.blue(color))
+
+    private fun formatOffset(seconds: Double): String {
+        val s = seconds.toInt().coerceAtLeast(0)
+        val h = s / 3600; val m = (s % 3600) / 60; val sec = s % 60
+        return if (h > 0) String.format("%d:%02d:%02d", h, m, sec) else String.format("%d:%02d", m, sec)
+    }
+
+    private fun findActivity(): Activity? {
+        var c: Context? = context
+        while (c is ContextWrapper) { if (c is Activity) return c; c = c.baseContext }
+        return null
+    }
+
+    private fun loadLogo(url: String) {
+        Thread {
+            try {
+                val bmp: Bitmap? = URL(url).openStream().use { BitmapFactory.decodeStream(it) }
+                if (bmp != null) mainHandler.post {
+                    logoView.setImageBitmap(bmp); logoView.visibility = View.VISIBLE
+                }
+            } catch (_: Exception) { /* ignore logo failures */ }
+        }.start()
     }
 }

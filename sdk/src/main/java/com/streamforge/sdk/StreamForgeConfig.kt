@@ -22,6 +22,10 @@ package com.streamforge.sdk
  * @property bufferForPlaybackMs Minimum buffer before playback starts (ms).
  * @property bufferForPlaybackAfterRebufferMs Minimum buffer after rebuffer before playback resumes (ms).
  * @property enableSse Enable SSE (Server-Sent Events) for real-time stream status. When false, uses polling only.
+ * @property autoplay Start playback automatically once the stream is ready. Mirrors the web embed `autoplay` param.
+ * @property muted Start muted. Mirrors the web embed `muted` param.
+ * @property showControls Show the player control bar. Mirrors the web embed `controls` param.
+ * @property logoOpacity Opacity (0..1) of the tenant logo overlay. Mirrors the web embed `logo_opacity` param.
  */
 data class StreamForgeConfig(
     val baseUrl: String = Companion.BASE_URL,
@@ -34,7 +38,12 @@ data class StreamForgeConfig(
     val maxVideoWidth: Int? = null,
     val maxVideoHeight: Int? = null,
     val bufferForPlaybackMs: Int = 2500,
-    val bufferForPlaybackAfterRebufferMs: Int = 5000
+    val bufferForPlaybackAfterRebufferMs: Int = 5000,
+    // Playback options (mirror the web embed query params)
+    val autoplay: Boolean = true,
+    val muted: Boolean = false,
+    val showControls: Boolean = true,
+    val logoOpacity: Float = 1f
 ) {
     class Builder {
         private var baseUrl: String = BASE_URL
@@ -47,6 +56,10 @@ data class StreamForgeConfig(
         private var maxVideoHeight: Int? = null
         private var bufferForPlaybackMs: Int = 2500
         private var bufferForPlaybackAfterRebufferMs: Int = 5000
+        private var autoplay: Boolean = true
+        private var muted: Boolean = false
+        private var showControls: Boolean = true
+        private var logoOpacity: Float = 1f
 
         fun baseUrl(url: String) = apply { this.baseUrl = url }
         fun enableLogging(enable: Boolean) = apply { this.enableLogging = enable }
@@ -58,6 +71,10 @@ data class StreamForgeConfig(
         fun maxVideoHeight(height: Int) = apply { this.maxVideoHeight = height }
         fun bufferForPlaybackMs(ms: Int) = apply { this.bufferForPlaybackMs = ms }
         fun bufferForPlaybackAfterRebufferMs(ms: Int) = apply { this.bufferForPlaybackAfterRebufferMs = ms }
+        fun autoplay(enable: Boolean) = apply { this.autoplay = enable }
+        fun muted(enable: Boolean) = apply { this.muted = enable }
+        fun showControls(show: Boolean) = apply { this.showControls = show }
+        fun logoOpacity(opacity: Float) = apply { this.logoOpacity = opacity.coerceIn(0f, 1f) }
 
         fun build(): StreamForgeConfig {
             return StreamForgeConfig(
@@ -70,13 +87,17 @@ data class StreamForgeConfig(
                 maxVideoWidth = maxVideoWidth,
                 maxVideoHeight = maxVideoHeight,
                 bufferForPlaybackMs = bufferForPlaybackMs,
-                bufferForPlaybackAfterRebufferMs = bufferForPlaybackAfterRebufferMs
+                bufferForPlaybackAfterRebufferMs = bufferForPlaybackAfterRebufferMs,
+                autoplay = autoplay,
+                muted = muted,
+                showControls = showControls,
+                logoOpacity = logoOpacity
             )
         }
     }
 
     companion object {
-        internal const val BASE_URL = "https://docs.ctree.id"
+        internal const val BASE_URL = "https://backend.digitalbroadcast.id"
         fun builder() = Builder()
     }
 }

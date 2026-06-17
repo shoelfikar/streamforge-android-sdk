@@ -5,8 +5,7 @@ import com.streamforge.sdk.api.ApiClient
 import com.streamforge.sdk.exception.SFNotInitializedException
 import com.streamforge.sdk.model.TenantConfig
 import com.streamforge.sdk.exception.StreamForgeException
-import com.streamforge.sdk.player.PlaybackState
-import com.streamforge.sdk.player.PlayerEventListener
+import com.streamforge.sdk.player.PlayerConstants
 import com.streamforge.sdk.player.StreamForgeErrorView
 import com.streamforge.sdk.player.StreamForgePlayer
 import com.streamforge.sdk.player.StreamForgePlayerView
@@ -51,6 +50,7 @@ object StreamForge {
     @Volatile private var _tenantConfig: TenantConfig? = null
     @Volatile internal var _apiKey: String? = null
     @Volatile private var _streamUrl: String? = null
+    @Volatile private var _rawStreamUrl: String? = null
     @Volatile private var _streamTitle: String? = null
     @Volatile private var _streamId: String? = null
     @Volatile internal var _config: StreamForgeConfig? = null
@@ -67,6 +67,52 @@ object StreamForge {
         get() = _streamTitle
     val streamId: String?
         get() = _streamId
+
+    /**
+     * Live playback URL: fMP4 variant of the raw stream URL with the API key token.
+     * Mirrors the web embed: `toFmp4Url(appendTokenToHlsUrl(stream.url, apiKey))`.
+     */
+    internal val liveUrl: String?
+        get() {
+            val raw = _rawStreamUrl ?: return _streamUrl
+            return appendToken(toFmp4(raw), _apiKey)
+        }
+
+    /**
+     * Full-window (24h) rewind/DVR playback URL for live-rewind.
+     * Mirrors the web: `raw.replace("/index.m3u8", "/rewind-86400.fmp4.m3u8")` + token.
+     */
+    internal val rewindUrl: String?
+        get() {
+            val raw = _rawStreamUrl ?: return null
+            if (!raw.contains("/index.m3u8")) return null
+            return appendToken(raw.replace("/index.m3u8", "/rewind-86400.fmp4.m3u8"), _apiKey)
+        }
+
+    /**
+     * Small-window rewind URL used only to DETECT DVR availability (near-empty playlist).
+     * Mirrors the web: `raw.replace("/index.m3u8", "/rewind-60.m3u8")` + token.
+     */
+    internal val rewindProbeUrl: String?
+        get() {
+            val raw = _rawStreamUrl ?: return null
+            if (!raw.contains("/index.m3u8")) return null
+            return appendToken(
+                raw.replace("/index.m3u8", "/rewind-${PlayerConstants.DVR_PROBE_WINDOW_S}.m3u8"),
+                _apiKey
+            )
+        }
+
+    /** Convert an HLS playlist URL to its fMP4 variant (index.m3u8 → index.fmp4.m3u8). */
+    private fun toFmp4(url: String): String =
+        url.replace(Regex("\\.m3u8(?=$|\\?)"), ".fmp4.m3u8")
+
+    /** Append `?token=<apiKey>` to an HLS URL (mirror appendTokenToHlsUrl). */
+    private fun appendToken(url: String, token: String?): String {
+        if (token.isNullOrBlank()) return url
+        val sep = if (url.contains("?")) "&" else "?"
+        return "$url${sep}token=$token"
+    }
 
     internal val apiClient: ApiClient
         get() = _apiClient ?: throw SFNotInitializedException()
@@ -107,6 +153,7 @@ object StreamForge {
         _apiKey = apiKey
         _streamId = streamId
         val baseStreamUrl = streamUrlResponse.url
+        _rawStreamUrl = baseStreamUrl
         val separator = if (baseStreamUrl.contains("?")) "&" else "?"
         _streamUrl = "${baseStreamUrl}${separator}token=${apiKey}"
         _streamTitle = streamUrlResponse.title
@@ -199,20 +246,15 @@ object StreamForge {
                     setBackgroundColor(0xFF000000.toInt())
                 }
 
-                // 3. Attach view & set title and metadata
+                // 3. Attach view, apply branding (matches the web embed look)
                 player.attachView(playerView)
                 playerView.player = player
-                playerView.setTitle(_streamTitle)
-                playerView.setLiveStatus(true)
+                playerView.setBrandColor(_tenantConfig?.brandColor ?: PlayerConstants.DEFAULT_BRAND_COLOR)
+                playerView.setLogo(_tenantConfig?.logoUrl, _config?.logoOpacity ?: 1f)
+                playerView.setControlsEnabled(_config?.showControls ?: true)
 
-                // 4. Load stream with auto-play
-                player.load(object : PlayerEventListener {
-                    override fun onPlaybackStateChanged(state: PlaybackState) {
-                        if (state == PlaybackState.READY) {
-                            player.play()
-                        }
-                    }
-                })
+                // 4. Load stream — autoplay / initial-mute honoured from config
+                player.load()
 
                 // 5. Notify success
                 playerSetupListener.onPlayerSetupSuccess(playerView)
@@ -247,6 +289,7 @@ object StreamForge {
         _tenantConfig = null
         _apiKey = null
         _streamUrl = null
+        _rawStreamUrl = null
         _streamTitle = null
         _streamId = null
         _config = null

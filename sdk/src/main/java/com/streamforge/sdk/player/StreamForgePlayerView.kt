@@ -477,7 +477,13 @@ class StreamForgePlayerView @JvmOverloads constructor(
             setPadding(dp(12), dp(8), dp(12), dp(8))
         })
 
-        val popup = PopupWindow(menu, dp(160), ViewGroup.LayoutParams.WRAP_CONTENT, true)
+        val popupWidth = dp(160)
+        // focusable = false → popup tidak merebut focus, sehingga immersive
+        // (system bar tersembunyi) tetap aktif. outsideTouchable + background
+        // transparan tetap memungkinkan dismiss saat tap di luar.
+        val popup = PopupWindow(menu, popupWidth, ViewGroup.LayoutParams.WRAP_CONTENT, false)
+        popup.isOutsideTouchable = true
+        popup.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
 
         // Auto
         menu.addView(qualityOption("Auto", "ABR", currentQualityHeight == -1) {
@@ -492,7 +498,15 @@ class StreamForgePlayerView @JvmOverloads constructor(
         }
 
         popup.elevation = dp(8).toFloat()
-        popup.showAsDropDown(qualityGroup, 0, -(qualityGroup.height + dp(220)))
+        // Ukur tinggi menu agar bisa diposisikan tepat DI ATAS tombol (seperti web),
+        // dan right-aligned ke tepi kanan tombol.
+        menu.measure(
+            View.MeasureSpec.makeMeasureSpec(popupWidth, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        val menuHeight = menu.measuredHeight
+        val xOff = qualityGroup.width - popupWidth
+        popup.showAsDropDown(qualityGroup, xOff, -(qualityGroup.height + menuHeight + dp(8)))
         resetHideTimerWhileVisible()
     }
 

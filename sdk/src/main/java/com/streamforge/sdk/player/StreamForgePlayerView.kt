@@ -233,6 +233,9 @@ class StreamForgePlayerView @JvmOverloads constructor(
 
     // ── Gestures ──
     private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
+        // Must return true so the detector keeps receiving MOVE/UP after DOWN —
+        // otherwise onSingleTapConfirmed / onDoubleTap never fire.
+        override fun onDown(e: MotionEvent): Boolean = true
         override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
             if (controlsEnabled) toggleControls()
             return true
